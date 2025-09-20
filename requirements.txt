@@ -3,3 +3,6 @@ pandas
 numpy
 yfinance
 plotly
+xgboost
+tensorflow
+scikit-learn
