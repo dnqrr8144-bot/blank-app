@@ -7,6 +7,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+from ensemble_scoring import combine, get_available_horizons, get_model_weights, MODEL_DESCRIPTIONS, validate_components
 
 # Configuration class equivalent to the React config
 class Config:
@@ -276,6 +277,174 @@ if selected_stocks:
         )
         
         st.plotly_chart(fig_returns, use_container_width=True)
+        
+        # Ensemble Scoring section
+        st.subheader("🤖 Ensemble Model Scoring")
+        st.markdown("<div class='rtl-text'>מערכת ציון הצבעה של מודלים</div>", unsafe_allow_html=True)
+        
+        # Create tabs for different horizons
+        horizon_tabs = st.tabs([f"{h} Days" for h in get_available_horizons()])
+        
+        ensemble_results = {}
+        
+        for i, horizon in enumerate(get_available_horizons()):
+            with horizon_tabs[i]:
+                st.markdown(f"### Prediction Horizon: {horizon} Days")
+                st.markdown(f"<div class='rtl-text'>אופק חיזוי: {horizon} ימים</div>", unsafe_allow_html=True)
+                
+                # Display model weights for this horizon
+                weights = get_model_weights(horizon)
+                st.markdown("**Model Weights for this Horizon:**")
+                
+                weight_cols = st.columns(len(weights))
+                for j, (model, weight) in enumerate(weights.items()):
+                    with weight_cols[j]:
+                        st.metric(MODEL_DESCRIPTIONS.get(model, model), f"{weight:.2%}")
+                
+                st.markdown("---")
+                
+                # Input section for model component scores
+                st.markdown("**Enter Model Component Scores** (Range: -1 to 1)")
+                st.markdown("<div class='rtl-text'>הכנס ציוני רכיבי המודל (טווח: -1 עד 1)</div>", unsafe_allow_html=True)
+                
+                components = {}
+                input_cols = st.columns(4)  # 4 columns for better layout
+                
+                col_idx = 0
+                for model_key, model_name in MODEL_DESCRIPTIONS.items():
+                    with input_cols[col_idx % 4]:
+                        components[model_key] = st.slider(
+                            f"{model_name}",
+                            min_value=-1.0,
+                            max_value=1.0,
+                            value=0.0,
+                            step=0.1,
+                            key=f"{model_key}_{horizon}",
+                            help=f"Score for {model_name} model (Weight: {weights.get(model_key, 0):.1%})"
+                        )
+                    col_idx += 1
+                
+                # Validate components
+                validation = validate_components(components)
+                valid_components = all(result == "Valid" for result in validation.values())
+                
+                if valid_components:
+                    # Calculate ensemble score
+                    ensemble_score = combine(horizon, components)
+                    ensemble_results[horizon] = {
+                        'score': ensemble_score,
+                        'components': components.copy()
+                    }
+                    
+                    # Display results
+                    st.markdown("---")
+                    st.markdown("**Ensemble Results:**")
+                    
+                    result_cols = st.columns([2, 1, 1])
+                    
+                    with result_cols[0]:
+                        # Colored score display
+                        score_color = "green" if ensemble_score > 0.1 else "red" if ensemble_score < -0.1 else "orange"
+                        st.markdown(f"""
+                        <div style='text-align: center; padding: 20px; border-radius: 10px; background-color: {score_color}20; border: 2px solid {score_color}'>
+                            <h2 style='color: {score_color}; margin: 0;'>Ensemble Score</h2>
+                            <h1 style='color: {score_color}; margin: 10px 0;'>{ensemble_score:.4f}</h1>
+                            <p style='margin: 0;'>Range: [-1, 1]</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with result_cols[1]:
+                        # Signal interpretation
+                        if ensemble_score > 0.3:
+                            signal = "🟢 Strong Buy"
+                            signal_ar = "🟢 קנייה חזקה"
+                        elif ensemble_score > 0.1:
+                            signal = "🟢 Buy"
+                            signal_ar = "🟢 קנייה"
+                        elif ensemble_score > -0.1:
+                            signal = "🟡 Hold"
+                            signal_ar = "🟡 החזקה"
+                        elif ensemble_score > -0.3:
+                            signal = "🔴 Sell"
+                            signal_ar = "🔴 מכירה"
+                        else:
+                            signal = "🔴 Strong Sell"
+                            signal_ar = "🔴 מכירה חזקה"
+                        
+                        st.metric("Signal", signal)
+                        st.markdown(f"<div class='rtl-text'>{signal_ar}</div>", unsafe_allow_html=True)
+                    
+                    with result_cols[2]:
+                        # Confidence based on component agreement
+                        component_values = list(components.values())
+                        component_std = np.std(component_values)
+                        confidence = max(0, 1 - component_std)
+                        
+                        st.metric("Confidence", f"{confidence:.2%}")
+                        st.markdown("<div class='rtl-text'>רמת ביטחון</div>", unsafe_allow_html=True)
+                    
+                    # Component contribution analysis
+                    st.markdown("**Component Contributions:**")
+                    contrib_data = []
+                    for model_key, score in components.items():
+                        weight = weights.get(model_key, 0)
+                        contribution = weight * score
+                        contrib_data.append({
+                            'Model': MODEL_DESCRIPTIONS.get(model_key, model_key),
+                            'Score': score,
+                            'Weight': weight,
+                            'Contribution': contribution
+                        })
+                    
+                    contrib_df = pd.DataFrame(contrib_data)
+                    
+                    # Create contribution chart
+                    fig_contrib = px.bar(
+                        contrib_df,
+                        x='Model',
+                        y='Contribution',
+                        title=f"Model Contributions to Ensemble Score ({horizon} days)",
+                        color='Contribution',
+                        color_continuous_scale=['red', 'yellow', 'green']
+                    )
+                    fig_contrib.update_layout(height=400)
+                    st.plotly_chart(fig_contrib, use_container_width=True)
+                    
+                    # Display contribution table
+                    st.dataframe(contrib_df, use_container_width=True)
+                
+                else:
+                    st.error("Please ensure all component scores are valid.")
+        
+        # Summary comparison across horizons
+        if len(ensemble_results) > 1:
+            st.markdown("---")
+            st.subheader("📊 Horizon Comparison")
+            st.markdown("<div class='rtl-text'>השוואת אופקי זמן</div>", unsafe_allow_html=True)
+            
+            # Create comparison chart
+            comparison_data = []
+            for horizon, result in ensemble_results.items():
+                comparison_data.append({
+                    'Horizon (Days)': horizon,
+                    'Ensemble Score': result['score']
+                })
+            
+            if comparison_data:
+                comparison_df = pd.DataFrame(comparison_data)
+                
+                fig_comparison = px.line(
+                    comparison_df,
+                    x='Horizon (Days)',
+                    y='Ensemble Score',
+                    title="Ensemble Scores Across Different Horizons",
+                    markers=True
+                )
+                fig_comparison.add_hline(y=0, line_dash="dash", line_color="gray")
+                fig_comparison.update_layout(height=400)
+                st.plotly_chart(fig_comparison, use_container_width=True)
+                
+                st.dataframe(comparison_df, use_container_width=True)
         
         # Monte Carlo Simulation section
         st.subheader("🎲 Monte Carlo Simulation")
